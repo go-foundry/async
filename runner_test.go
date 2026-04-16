@@ -125,6 +125,63 @@ var _ = Describe("TaskRunner", func() {
 		Expect(errors.Is(err, context.Canceled)).To(BeTrue())
 	})
 
+	It("filters out Start error when ErrorFilter returns true", func() {
+		startErr := errors.New("expected shutdown")
+
+		runner := &async.TaskRunner{
+			Start: func(ctx context.Context) error {
+				return startErr
+			},
+			Shutdown: func(ctx context.Context) error {
+				return nil
+			},
+			ErrorFilter: func(err error) bool {
+				return errors.Is(err, startErr)
+			},
+		}
+
+		err := runner.Run(context.Background())
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	It("filters out Shutdown error when ErrorFilter returns true", func() {
+		shutdownErr := errors.New("expected shutdown")
+
+		runner := &async.TaskRunner{
+			Start: func(ctx context.Context) error {
+				return nil
+			},
+			Shutdown: func(ctx context.Context) error {
+				return shutdownErr
+			},
+			ErrorFilter: func(err error) bool {
+				return errors.Is(err, shutdownErr)
+			},
+		}
+
+		err := runner.Run(context.Background())
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	It("keeps errors when ErrorFilter returns false", func() {
+		startErr := errors.New("real error")
+
+		runner := &async.TaskRunner{
+			Start: func(ctx context.Context) error {
+				return startErr
+			},
+			Shutdown: func(ctx context.Context) error {
+				return nil
+			},
+			ErrorFilter: func(err error) bool {
+				return false
+			},
+		}
+
+		err := runner.Run(context.Background())
+		Expect(errors.Is(err, startErr)).To(BeTrue())
+	})
+
 	It("uses ShutdownTimeout for the shutdown context", func() {
 		runner := &async.TaskRunner{
 			Start: func(ctx context.Context) error {

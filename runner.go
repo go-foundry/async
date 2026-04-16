@@ -47,6 +47,10 @@ type TaskRunner struct {
 	Shutdown func(context.Context) error
 	// ShutdownTimeout bounds how long Shutdown may run. Defaults to 1 minute.
 	ShutdownTimeout time.Duration
+	// ErrorFilter, when set, is called for each non-nil error returned by
+	// Start or Shutdown. If it returns true the error is discarded (filtered
+	// out). This is useful for expected errors such as [http.ErrServerClosed].
+	ErrorFilter func(error) bool
 }
 
 // Run starts the operation and handles graceful shutdown.
@@ -84,6 +88,15 @@ func (x *TaskRunner) Run(pctx context.Context) error {
 	cancel()
 
 	shutdownErr := task.Wait()
+
+	if x.ErrorFilter != nil {
+		if startErr != nil && x.ErrorFilter(startErr) {
+			startErr = nil
+		}
+		if shutdownErr != nil && x.ErrorFilter(shutdownErr) {
+			shutdownErr = nil
+		}
+	}
 
 	return errors.Join(startErr, shutdownErr)
 }
