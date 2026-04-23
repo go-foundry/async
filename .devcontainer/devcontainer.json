@@ -16,5 +16,5 @@
   "capAdd": [
     "SYS_PTRACE"
   ],
-  "postStartCommand": "sudo chown vscode:vscode /nix /home/vscode/.cache /home/vscode/go"
+  "postStartCommand": "sudo chown vscode:vscode /nix /home/vscode/.cache"
 }
