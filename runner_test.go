@@ -3,7 +3,12 @@ package async_test
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/go-foundry/async"
@@ -199,6 +204,178 @@ var _ = Describe("TaskRunner", func() {
 
 		err := runner.Run(context.Background())
 		Expect(err).NotTo(HaveOccurred())
+	})
+})
+
+var _ = Describe("TaskRunner with a shutdown signal", func() {
+	var (
+		server   *http.Server
+		listener net.Listener
+		runner   *async.TaskRunner
+		sigs     chan chan<- os.Signal
+		client   *http.Client
+		url      string
+	)
+
+	// get opens a new connection per request, so a successful request proves
+	// that the listener still accepts connections.
+	get := func(path string) error {
+		resp, err := client.Get(url + path)
+		if err != nil {
+			return err
+		}
+		return resp.Body.Close()
+	}
+
+	// run runs the runner in the background and returns once the runner has
+	// registered for the signals and the server accepts requests.
+	run := func(ctx context.Context) (chan<- os.Signal, <-chan error) {
+		done := make(chan error, 1)
+		go func() {
+			defer GinkgoRecover()
+			done <- runner.Run(ctx)
+		}()
+
+		var ch chan<- os.Signal
+		Eventually(sigs).Should(Receive(&ch))
+		Eventually(func() error { return get("/") }).Should(Succeed())
+
+		return ch, done
+	}
+
+	BeforeEach(func() {
+		sigs = make(chan chan<- os.Signal, 1)
+		DeferCleanup(async.SetNotify(func(ch chan<- os.Signal, _ ...os.Signal) { sigs <- ch }))
+
+		var err error
+		listener, err = net.Listen("tcp", "127.0.0.1:0")
+		Expect(err).NotTo(HaveOccurred())
+		url = "http://" + listener.Addr().String()
+
+		server = &http.Server{
+			Handler:           http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+			ReadHeaderTimeout: time.Second,
+		}
+		DeferCleanup(server.Close)
+
+		client = &http.Client{
+			Transport: &http.Transport{DisableKeepAlives: true},
+			Timeout:   time.Second,
+		}
+
+		runner = &async.TaskRunner{
+			Start:         func(context.Context) error { return server.Serve(listener) },
+			Shutdown:      server.Shutdown,
+			ShutdownDelay: 500 * time.Millisecond,
+			ErrorFilter: func(err error) bool {
+				return errors.Is(err, http.ErrServerClosed)
+			},
+			Logger: slog.New(slog.NewTextHandler(GinkgoWriter, nil)),
+		}
+	})
+
+	When("the task receives SIGTERM", func() {
+		It("keeps serving for the shutdown delay before it shuts down", func(ctx SpecContext) {
+			ch, done := run(ctx)
+
+			signaled := time.Now()
+			ch <- syscall.SIGTERM
+
+			Consistently(func() error { return get("/") }, 400*time.Millisecond, 50*time.Millisecond).Should(Succeed())
+			Eventually(done).Should(Receive(BeNil()))
+			Expect(time.Since(signaled)).To(BeNumerically(">=", runner.ShutdownDelay))
+			Expect(get("/")).To(HaveOccurred())
+		})
+
+		It("cancels the Start context only after the shutdown delay", func(ctx SpecContext) {
+			cancelled := make(chan time.Time, 1)
+			runner.Start = func(sctx context.Context) error {
+				go func() {
+					<-sctx.Done()
+					cancelled <- time.Now()
+				}()
+				return server.Serve(listener)
+			}
+
+			ch, done := run(ctx)
+
+			signaled := time.Now()
+			ch <- syscall.SIGTERM
+
+			var at time.Time
+			Eventually(cancelled).Should(Receive(&at))
+			Expect(at.Sub(signaled)).To(BeNumerically(">=", runner.ShutdownDelay))
+			Eventually(done).Should(Receive(BeNil()))
+		})
+
+		It("waits for the in-flight requests after the shutdown delay", func(ctx SpecContext) {
+			started := make(chan struct{})
+			release := make(chan struct{})
+			server.Handler = http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/slow" {
+					close(started)
+					<-release
+				}
+			})
+
+			ch, done := run(ctx)
+			ch <- syscall.SIGTERM
+
+			requested := make(chan error, 1)
+			go func() { requested <- get("/slow") }()
+			Eventually(started).Should(BeClosed())
+
+			Consistently(done, runner.ShutdownDelay+200*time.Millisecond).ShouldNot(Receive())
+			close(release)
+			Eventually(requested).Should(Receive(BeNil()))
+			Eventually(done).Should(Receive(BeNil()))
+		})
+
+		When("the task receives another signal", func() {
+			It("skips the shutdown delay", func(ctx SpecContext) {
+				runner.ShutdownDelay = time.Minute
+
+				ch, done := run(ctx)
+				ch <- syscall.SIGTERM
+				ch <- syscall.SIGTERM
+
+				Eventually(done).Should(Receive(BeNil()))
+			})
+		})
+
+		When("the shutdown delay is zero", func() {
+			It("shuts down at once", func(ctx SpecContext) {
+				runner.ShutdownDelay = 0
+
+				ch, done := run(ctx)
+				ch <- syscall.SIGTERM
+
+				Eventually(done).Should(Receive(BeNil()))
+			})
+		})
+	})
+
+	When("the task receives SIGINT", func() {
+		It("skips the shutdown delay", func(ctx SpecContext) {
+			runner.ShutdownDelay = time.Minute
+
+			ch, done := run(ctx)
+			ch <- syscall.SIGINT
+
+			Eventually(done).Should(Receive(BeNil()))
+		})
+	})
+
+	When("the parent context is done", func() {
+		It("skips the shutdown delay", func(ctx SpecContext) {
+			runner.ShutdownDelay = time.Minute
+
+			rctx, cancel := context.WithCancel(ctx)
+			_, done := run(rctx)
+			cancel()
+
+			Eventually(done).Should(Receive(Succeed()))
+		})
 	})
 })
 

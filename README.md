@@ -29,12 +29,31 @@ runner := &async.TaskRunner{
         return server.Shutdown(ctx)
     },
     ShutdownTimeout: 30 * time.Second,
+    ErrorFilter: func(err error) bool {
+        return errors.Is(err, http.ErrServerClosed)
+    },
 }
 
 if err := runner.Run(ctx); err != nil {
     log.Fatal(err)
 }
 ```
+
+Behind a service mesh or a load balancer, callers may keep routing requests
+to the process for a few seconds after SIGTERM. Set `ShutdownDelay` to keep
+serving for that long before shutdown begins:
+
+```go
+runner := &async.TaskRunner{
+    // ...
+    ShutdownDelay: 20 * time.Second,
+}
+```
+
+After SIGTERM the runner waits for `ShutdownDelay`, then cancels the context
+passed to `Start` and calls `Shutdown`. A second signal, SIGINT (Ctrl-C), or the
+parent context being done skips the delay. `Logger` (default `slog.Default()`)
+logs each step of the shutdown.
 
 ### TaskGroup -- parallel execution
 
