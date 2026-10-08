@@ -3,7 +3,7 @@ module github.com/go-foundry/async
 go 1.25.0
 
 require (
-	github.com/alitto/pond/v2 v2.7.1
+	github.com/alitto/pond/v2 v2.7.2
 	github.com/onsi/ginkgo/v2 v2.33.0
 	github.com/onsi/gomega v1.44.0
 )
