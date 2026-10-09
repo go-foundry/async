@@ -29,11 +29,47 @@ runner := &async.TaskRunner{
         return server.Shutdown(ctx)
     },
     ShutdownTimeout: 30 * time.Second,
+    ErrorFilter: func(err error) bool {
+        return errors.Is(err, http.ErrServerClosed)
+    },
 }
 
 if err := runner.Run(ctx); err != nil {
     log.Fatal(err)
 }
+```
+
+Behind a service mesh or a load balancer, callers may keep routing requests
+to the process for a few seconds after SIGTERM. Set `ShutdownDelay` to keep
+serving for that long before shutdown begins:
+
+```go
+runner := &async.TaskRunner{
+    // ...
+    ShutdownDelay: 20 * time.Second,
+}
+```
+
+After SIGTERM the runner waits for `ShutdownDelay`, then cancels the context
+passed to `Start` and calls `Shutdown`. A second signal, SIGINT (Ctrl-C), or the
+parent context being done skips the delay. `Logger` (default `slog.Default()`)
+logs each step of the shutdown.
+
+The runner must receive SIGTERM itself for the delay to work. Do not pass `Run`
+a context from `signal.NotifyContext` on SIGTERM: that context is done at
+SIGTERM, which skips the delay.
+
+To test the shutdown sequence, set `Notify` to capture the runner's signal
+channel and send signals to it, instead of signalling the whole process:
+
+```go
+registered := make(chan chan<- os.Signal, 1)
+runner.Notify = func(ch chan<- os.Signal, _ ...os.Signal) { registered <- ch }
+
+go runner.Run(ctx)
+
+signals := <-registered
+signals <- syscall.SIGTERM
 ```
 
 ### TaskGroup -- parallel execution

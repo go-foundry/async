@@ -7,6 +7,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"os"
 	"os/signal"
 	"sync"
 	"syscall"
@@ -38,46 +40,91 @@ var _ Task = &TaskRunner{}
 // blocking process that needs a coordinated start/shutdown lifecycle.
 type TaskRunner struct {
 	// Start launches the blocking operation. It receives a context that is
-	// cancelled on SIGINT/SIGTERM or when the parent context is done.
+	// cancelled when shutdown begins: on SIGINT, at the end of ShutdownDelay
+	// after SIGTERM, or when the parent context is done.
 	// A nil Start is treated as a no-op.
 	Start func(context.Context) error
 	// Shutdown is called after Start returns or the context is cancelled.
-	// It receives a context bounded by ShutdownTimeout.
-	// A nil Shutdown is treated as a no-op.
+	// It receives a context bounded by ShutdownTimeout. That context is not
+	// cancelled when the parent context is done, so Shutdown can still wait
+	// for in-flight work. A nil Shutdown is treated as a no-op.
 	Shutdown func(context.Context) error
+	// ShutdownDelay is how long the task keeps running after SIGTERM before
+	// shutdown begins. Behind a service mesh or a load balancer, callers may
+	// still route new requests to the process for a few seconds after
+	// SIGTERM; an HTTP server that closes its listener at once refuses them.
+	// A second signal skips the rest of the delay. SIGINT (Ctrl-C in a local
+	// run), the parent context being done, or Start returning skip it too.
+	// Zero means no delay.
+	//
+	// The delay only works when the runner receives SIGTERM itself. Do not
+	// pass Run a context from [signal.NotifyContext] on SIGTERM: that context
+	// is done at SIGTERM, which skips the delay.
+	ShutdownDelay time.Duration
 	// ShutdownTimeout bounds how long Shutdown may run. Defaults to 1 minute.
 	ShutdownTimeout time.Duration
 	// ErrorFilter, when set, is called for each non-nil error returned by
 	// Start or Shutdown. If it returns true the error is discarded (filtered
 	// out). This is useful for expected errors such as [http.ErrServerClosed].
 	ErrorFilter func(error) bool
+	// Logger logs the shutdown sequence: why shutdown began, the delay, and
+	// the start and end of Shutdown. Defaults to [slog.Default].
+	Logger *slog.Logger
+	// Notify registers the channel that receives SIGINT and SIGTERM.
+	// Defaults to [signal.Notify]. Tests can replace it to send signals to
+	// the runner without signalling the whole process.
+	Notify func(chan<- os.Signal, ...os.Signal)
 }
 
 // Run starts the operation and handles graceful shutdown.
 //
-// It listens for SIGINT and SIGTERM to trigger shutdown. When Start returns
-// (for any reason), Shutdown is called with a timeout-bounded context.
+// It listens for SIGINT and SIGTERM to trigger shutdown. After SIGTERM it
+// waits for ShutdownDelay first. When Start returns (for any reason),
+// Shutdown is called with a timeout-bounded context.
 // The returned error is the result of [errors.Join] on the Start and
 // Shutdown errors, so callers can inspect both with [errors.Is].
 func (x *TaskRunner) Run(pctx context.Context) error {
-	nctx, nstop := signal.NotifyContext(pctx, syscall.SIGINT, syscall.SIGTERM)
-	defer nstop()
+	incoming := make(chan os.Signal, 2)
+	x.notify(incoming, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(incoming)
 
-	ctx, cancel := context.WithCancel(nctx)
+	ctx, cancel := context.WithCancel(pctx)
 	defer cancel()
 
+	logger := cmp.Or(x.Logger, slog.Default())
+
 	task := pond.SubmitErr(func() error {
-		<-ctx.Done()
+		select {
+		case sig := <-incoming:
+			logger.Info("The task has received a shutdown signal", slog.String("signal", sig.String()))
+			x.delay(ctx, logger, sig, incoming)
+		case <-ctx.Done():
+			if pctx.Err() != nil {
+				logger.Info("The task's parent context is done")
+			} else {
+				logger.Info("The task has stopped")
+			}
+		}
+
+		// Start's context is cancelled only now, after the delay
+		cancel()
 
 		if x.Shutdown == nil {
 			return nil
 		}
 
 		timeout := cmp.Or(x.ShutdownTimeout, time.Minute)
-		sctx, stop := context.WithTimeout(pctx, timeout)
+		// The parent context may be done already; Shutdown still gets its timeout
+		sctx, stop := context.WithTimeout(context.WithoutCancel(pctx), timeout)
 		defer stop()
 
-		return x.Shutdown(sctx)
+		logger.Info("The task is shutting down", slog.Duration("timeout", timeout))
+		if err := x.Shutdown(sctx); err != nil {
+			return err
+		}
+		logger.Info("The task has shut down")
+
+		return nil
 	})
 
 	var startErr error
@@ -99,6 +146,37 @@ func (x *TaskRunner) Run(pctx context.Context) error {
 	}
 
 	return errors.Join(startErr, shutdownErr)
+}
+
+// delay blocks for ShutdownDelay after SIGTERM while the task keeps running.
+// It returns early on a second signal or when the context is done.
+func (x *TaskRunner) delay(ctx context.Context, logger *slog.Logger, sig os.Signal, incoming <-chan os.Signal) {
+	if sig != syscall.SIGTERM || x.ShutdownDelay <= 0 {
+		return
+	}
+
+	logger.Info("The task keeps running for the shutdown delay", slog.Duration("delay", x.ShutdownDelay))
+
+	timer := time.NewTimer(x.ShutdownDelay)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		logger.Info("The shutdown delay is over", slog.Duration("delay", x.ShutdownDelay))
+	case sig := <-incoming:
+		logger.Info("The task has received another signal, skipping the shutdown delay", slog.String("signal", sig.String()))
+	case <-ctx.Done():
+		logger.Info("The task's context is done, skipping the shutdown delay")
+	}
+}
+
+// notify registers c for the shutdown signals with Notify or signal.Notify.
+func (x *TaskRunner) notify(c chan<- os.Signal, sig ...os.Signal) {
+	if x.Notify != nil {
+		x.Notify(c, sig...)
+		return
+	}
+	signal.Notify(c, sig...)
 }
 
 var _ Task = &TaskGroup{}
