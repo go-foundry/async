@@ -67,8 +67,8 @@ type TaskRunner struct {
 	// Start or Shutdown. If it returns true the error is discarded (filtered
 	// out). This is useful for expected errors such as [http.ErrServerClosed].
 	ErrorFilter func(error) bool
-	// Logger logs the shutdown sequence: the signal, the delay, and the
-	// start and end of Shutdown. Defaults to [slog.Default].
+	// Logger logs the shutdown sequence: why shutdown began, the delay, and
+	// the start and end of Shutdown. Defaults to [slog.Default].
 	Logger *slog.Logger
 	// Notify registers the channel that receives SIGINT and SIGTERM.
 	// Defaults to [signal.Notify]. Tests can replace it to send signals to
@@ -99,6 +99,11 @@ func (x *TaskRunner) Run(pctx context.Context) error {
 			logger.Info("The task has received a shutdown signal", slog.String("signal", sig.String()))
 			x.delay(ctx, logger, sig, signals)
 		case <-ctx.Done():
+			if pctx.Err() != nil {
+				logger.Info("The task's parent context is done")
+			} else {
+				logger.Info("The task has stopped")
+			}
 		}
 
 		// Start's context is cancelled only now, after the delay
@@ -161,6 +166,7 @@ func (x *TaskRunner) delay(ctx context.Context, logger *slog.Logger, sig os.Sign
 	case sig := <-signals:
 		logger.Info("The task has received another signal, skipping the shutdown delay", slog.String("signal", sig.String()))
 	case <-ctx.Done():
+		logger.Info("The task's context is done, skipping the shutdown delay")
 	}
 }
 
