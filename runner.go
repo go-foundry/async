@@ -85,11 +85,7 @@ type TaskRunner struct {
 // Shutdown errors, so callers can inspect both with [errors.Is].
 func (x *TaskRunner) Run(pctx context.Context) error {
 	signals := make(chan os.Signal, 2)
-	notify := x.Notify
-	if notify == nil {
-		notify = signal.Notify
-	}
-	notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	x.notify(signals, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(signals)
 
 	ctx, cancel := context.WithCancel(pctx)
@@ -166,6 +162,15 @@ func (x *TaskRunner) delay(ctx context.Context, logger *slog.Logger, sig os.Sign
 		logger.Info("The task has received another signal, skipping the shutdown delay", slog.String("signal", sig.String()))
 	case <-ctx.Done():
 	}
+}
+
+// notify registers c for the shutdown signals with Notify or signal.Notify.
+func (x *TaskRunner) notify(c chan<- os.Signal, sig ...os.Signal) {
+	if x.Notify != nil {
+		x.Notify(c, sig...)
+		return
+	}
+	signal.Notify(c, sig...)
 }
 
 var _ Task = &TaskGroup{}
