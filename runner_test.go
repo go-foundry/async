@@ -245,7 +245,6 @@ var _ = Describe("TaskRunner with a shutdown signal", func() {
 
 	BeforeEach(func() {
 		signals = make(chan chan<- os.Signal, 1)
-		DeferCleanup(async.SetNotify(func(ch chan<- os.Signal, _ ...os.Signal) { signals <- ch }))
 
 		var err error
 		listener, err = net.Listen("tcp", "127.0.0.1:0")
@@ -271,6 +270,7 @@ var _ = Describe("TaskRunner with a shutdown signal", func() {
 				return errors.Is(err, http.ErrServerClosed)
 			},
 			Logger: slog.New(slog.NewTextHandler(GinkgoWriter, nil)),
+			Notify: func(ch chan<- os.Signal, _ ...os.Signal) { signals <- ch },
 		}
 	})
 

@@ -59,6 +59,19 @@ The runner must receive SIGTERM itself for the delay to work. Do not pass `Run`
 a context from `signal.NotifyContext` on SIGTERM: that context is done at
 SIGTERM, which skips the delay.
 
+To test the shutdown sequence, set `Notify` to capture the runner's signal
+channel and send signals to it, instead of signalling the whole process:
+
+```go
+registered := make(chan chan<- os.Signal, 1)
+runner.Notify = func(ch chan<- os.Signal, _ ...os.Signal) { registered <- ch }
+
+go runner.Run(ctx)
+
+signals := <-registered
+signals <- syscall.SIGTERM
+```
+
 ### TaskGroup -- parallel execution
 
 Run multiple tasks concurrently with optional concurrency limits:

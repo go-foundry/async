@@ -33,9 +33,6 @@ func (f TaskFunc) Run(ctx context.Context) error {
 	return f(ctx)
 }
 
-// notify relays the shutdown signals to the task runners. Tests replace it.
-var notify = signal.Notify
-
 var _ Task = &TaskRunner{}
 
 // TaskRunner runs a long-lived operation with graceful shutdown on SIGINT
@@ -73,6 +70,10 @@ type TaskRunner struct {
 	// Logger logs the shutdown sequence: the signal, the delay, and the
 	// start and end of Shutdown. Defaults to [slog.Default].
 	Logger *slog.Logger
+	// Notify registers the channel that receives SIGINT and SIGTERM.
+	// Defaults to [signal.Notify]. Tests can replace it to send signals to
+	// the runner without signalling the whole process.
+	Notify func(chan<- os.Signal, ...os.Signal)
 }
 
 // Run starts the operation and handles graceful shutdown.
@@ -84,6 +85,10 @@ type TaskRunner struct {
 // Shutdown errors, so callers can inspect both with [errors.Is].
 func (x *TaskRunner) Run(pctx context.Context) error {
 	signals := make(chan os.Signal, 2)
+	notify := x.Notify
+	if notify == nil {
+		notify = signal.Notify
+	}
 	notify(signals, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(signals)
 
