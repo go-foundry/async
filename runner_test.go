@@ -209,12 +209,12 @@ var _ = Describe("TaskRunner", func() {
 
 var _ = Describe("TaskRunner with a shutdown signal", func() {
 	var (
-		server   *http.Server
-		listener net.Listener
-		runner   *async.TaskRunner
-		signals  chan chan<- os.Signal
-		client   *http.Client
-		url      string
+		server     *http.Server
+		listener   net.Listener
+		runner     *async.TaskRunner
+		registered chan chan<- os.Signal
+		client     *http.Client
+		url        string
 	)
 
 	// get opens a new connection per request, so a successful request proves
@@ -237,14 +237,14 @@ var _ = Describe("TaskRunner with a shutdown signal", func() {
 		}()
 
 		var ch chan<- os.Signal
-		Eventually(signals).Should(Receive(&ch))
+		Eventually(registered).Should(Receive(&ch))
 		Eventually(func() error { return get("/") }).Should(Succeed())
 
 		return ch, done
 	}
 
 	BeforeEach(func() {
-		signals = make(chan chan<- os.Signal, 1)
+		registered = make(chan chan<- os.Signal, 1)
 
 		var err error
 		listener, err = net.Listen("tcp", "127.0.0.1:0")
@@ -270,7 +270,7 @@ var _ = Describe("TaskRunner with a shutdown signal", func() {
 				return errors.Is(err, http.ErrServerClosed)
 			},
 			Logger: slog.New(slog.NewTextHandler(GinkgoWriter, nil)),
-			Notify: func(ch chan<- os.Signal, _ ...os.Signal) { signals <- ch },
+			Notify: func(ch chan<- os.Signal, _ ...os.Signal) { registered <- ch },
 		}
 	})
 

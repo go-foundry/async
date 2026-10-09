@@ -84,9 +84,9 @@ type TaskRunner struct {
 // The returned error is the result of [errors.Join] on the Start and
 // Shutdown errors, so callers can inspect both with [errors.Is].
 func (x *TaskRunner) Run(pctx context.Context) error {
-	signals := make(chan os.Signal, 2)
-	x.notify(signals, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(signals)
+	sigch := make(chan os.Signal, 2)
+	x.notify(sigch, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigch)
 
 	ctx, cancel := context.WithCancel(pctx)
 	defer cancel()
@@ -95,9 +95,9 @@ func (x *TaskRunner) Run(pctx context.Context) error {
 
 	task := pond.SubmitErr(func() error {
 		select {
-		case sig := <-signals:
+		case sig := <-sigch:
 			logger.Info("The task has received a shutdown signal", slog.String("signal", sig.String()))
-			x.delay(ctx, logger, sig, signals)
+			x.delay(ctx, logger, sig, sigch)
 		case <-ctx.Done():
 			if pctx.Err() != nil {
 				logger.Info("The task's parent context is done")
@@ -150,7 +150,7 @@ func (x *TaskRunner) Run(pctx context.Context) error {
 
 // delay blocks for ShutdownDelay after SIGTERM while the task keeps running.
 // It returns early on a second signal or when the context is done.
-func (x *TaskRunner) delay(ctx context.Context, logger *slog.Logger, sig os.Signal, signals <-chan os.Signal) {
+func (x *TaskRunner) delay(ctx context.Context, logger *slog.Logger, sig os.Signal, sigch <-chan os.Signal) {
 	if sig != syscall.SIGTERM || x.ShutdownDelay <= 0 {
 		return
 	}
@@ -163,7 +163,7 @@ func (x *TaskRunner) delay(ctx context.Context, logger *slog.Logger, sig os.Sign
 	select {
 	case <-timer.C:
 		logger.Info("The shutdown delay is over", slog.Duration("delay", x.ShutdownDelay))
-	case sig := <-signals:
+	case sig := <-sigch:
 		logger.Info("The task has received another signal, skipping the shutdown delay", slog.String("signal", sig.String()))
 	case <-ctx.Done():
 		logger.Info("The task's context is done, skipping the shutdown delay")
