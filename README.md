@@ -55,6 +55,10 @@ passed to `Start` and calls `Shutdown`. A second signal, SIGINT (Ctrl-C), or the
 parent context being done skips the delay. `Logger` (default `slog.Default()`)
 logs each step of the shutdown.
 
+The runner must receive SIGTERM itself for the delay to work. Do not pass `Run`
+a context from `signal.NotifyContext` on SIGTERM: that context is done at
+SIGTERM, which skips the delay.
+
 ### TaskGroup -- parallel execution
 
 Run multiple tasks concurrently with optional concurrency limits:

@@ -212,7 +212,7 @@ var _ = Describe("TaskRunner with a shutdown signal", func() {
 		server   *http.Server
 		listener net.Listener
 		runner   *async.TaskRunner
-		sigs     chan chan<- os.Signal
+		signals  chan chan<- os.Signal
 		client   *http.Client
 		url      string
 	)
@@ -237,15 +237,15 @@ var _ = Describe("TaskRunner with a shutdown signal", func() {
 		}()
 
 		var ch chan<- os.Signal
-		Eventually(sigs).Should(Receive(&ch))
+		Eventually(signals).Should(Receive(&ch))
 		Eventually(func() error { return get("/") }).Should(Succeed())
 
 		return ch, done
 	}
 
 	BeforeEach(func() {
-		sigs = make(chan chan<- os.Signal, 1)
-		DeferCleanup(async.SetNotify(func(ch chan<- os.Signal, _ ...os.Signal) { sigs <- ch }))
+		signals = make(chan chan<- os.Signal, 1)
+		DeferCleanup(async.SetNotify(func(ch chan<- os.Signal, _ ...os.Signal) { signals <- ch }))
 
 		var err error
 		listener, err = net.Listen("tcp", "127.0.0.1:0")
@@ -374,7 +374,31 @@ var _ = Describe("TaskRunner with a shutdown signal", func() {
 			_, done := run(rctx)
 			cancel()
 
-			Eventually(done).Should(Receive(Succeed()))
+			Eventually(done).Should(Receive(BeNil()))
+		})
+
+		It("waits for the in-flight requests", func(ctx SpecContext) {
+			started := make(chan struct{})
+			release := make(chan struct{})
+			server.Handler = http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/slow" {
+					close(started)
+					<-release
+				}
+			})
+
+			rctx, cancel := context.WithCancel(ctx)
+			_, done := run(rctx)
+
+			requested := make(chan error, 1)
+			go func() { requested <- get("/slow") }()
+			Eventually(started).Should(BeClosed())
+
+			cancel()
+			Consistently(done, 200*time.Millisecond).ShouldNot(Receive())
+			close(release)
+			Eventually(requested).Should(Receive(BeNil()))
+			Eventually(done).Should(Receive(BeNil()))
 		})
 	})
 })
